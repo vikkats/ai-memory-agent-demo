@@ -1,0 +1,22 @@
+{
+  "name": "ai-memory-agent-demo",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Sanitized portfolio demo for an AI memory-agent dashboard.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "typescript": "latest"
+  },
+  "devDependencies": {}
+}
