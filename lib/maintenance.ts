@@ -1,9 +1,10 @@
 import { getConversation, listConversations, listMessages } from "./conversations";
 import { summarizeAndIndexConversation } from "./conversationSummaries";
-import { getAppSetting, setAppSetting } from "./appSettings";
+import { getAppSetting, setAppSetting, getAppTimezone } from "./appSettings";
 import { indexMemoryFiles } from "./indexing";
 import { appendJournalEntry, editMemoryFileWithBackup, readMemoryFile } from "./memory";
 import { generateText } from "./mockModel";
+import { isMockProvider } from "./providers";
 import { localDateTimeForPrompt } from "./time";
 import type { ProviderSettings } from "./types";
 
@@ -36,6 +37,11 @@ function minutesSince(iso: string | null): number | null {
   return (Date.now() - then) / 60_000;
 }
 
+function getSettingOrNull(key: string): string | null {
+  const value = getAppSetting(key, "");
+  return value || null;
+}
+
 export interface MaintenanceStatus {
   enabled: boolean;
   intervalMinutes: number;
@@ -51,15 +57,15 @@ export function getMaintenanceStatus(): MaintenanceStatus {
     MAX_INTERVAL_MINUTES,
     Math.max(MIN_INTERVAL_MINUTES, envNumber("AGENT_MAINTENANCE_INTERVAL_MINUTES", DEFAULT_INTERVAL_MINUTES)),
   );
-  const lastRunAt = getAppSetting(KEY_LAST_RUN_AT);
+  const lastRunAt = getSettingOrNull(KEY_LAST_RUN_AT);
   return {
     enabled: envFlag("AGENT_MAINTENANCE_ENABLED", true),
     intervalMinutes: interval,
     lastRunAt,
     minutesSinceLastRun: minutesSince(lastRunAt),
-    lastConversationId: getAppSetting(KEY_LAST_CONVERSATION_ID),
-    lastConversationUpdatedAt: getAppSetting(KEY_LAST_CONVERSATION_UPDATED_AT),
-    lastStatus: getAppSetting(KEY_LAST_STATUS),
+    lastConversationId: getSettingOrNull(KEY_LAST_CONVERSATION_ID),
+    lastConversationUpdatedAt: getSettingOrNull(KEY_LAST_CONVERSATION_UPDATED_AT),
+    lastStatus: getSettingOrNull(KEY_LAST_STATUS),
   };
 }
 
@@ -67,13 +73,14 @@ async function refreshLiveState(provider: ProviderSettings, conversationId: stri
   const conversation = getConversation(conversationId);
   const recent = listMessages(conversationId, 20).slice(-12);
   const lastUser = [...recent].reverse().find((m) => m.role === "user");
+  const now = localDateTimeForPrompt(new Date(), getAppTimezone());
 
   let body: string;
-  if (provider.mock) {
+  if (isMockProvider(provider)) {
     body = [
       `# Live State`,
       ``,
-      `- Refreshed: ${localDateTimeForPrompt()}`,
+      `- Refreshed: ${now}`,
       `- Active thread: ${conversation?.title ?? conversationId}`,
       `- Recent turns: ${recent.length}`,
       lastUser ? `- Last user input: ${lastUser.content.slice(0, 200)}` : `- Last user input: (none yet)`,
@@ -90,13 +97,13 @@ async function refreshLiveState(provider: ProviderSettings, conversationId: stri
       },
       {
         role: "user",
-        content: `Current time: ${localDateTimeForPrompt()}\nActive thread: ${conversation?.title ?? conversationId}\nRecent turns:\n${transcript}\n\nWrite the new live_state.md content.`,
+        content: `Current time: ${now}\nActive thread: ${conversation?.title ?? conversationId}\nRecent turns:\n${transcript}\n\nWrite the new live_state.md content.`,
       },
     ]);
     if (!body.trim()) throw new Error("Model returned empty live_state content.");
   }
 
-  editMemoryFileWithBackup("core/live_state.md", body);
+  await editMemoryFileWithBackup("core/live_state.md", body);
   return "core/live_state.md";
 }
 
@@ -191,11 +198,11 @@ export async function runMaintenanceCycle(
 
   if (writeJournal) {
     try {
-      const entry = appendJournalEntry(
-        `Maintenance cycle ran at ${localDateTimeForPrompt()}. Steps so far: ${result.steps.join("; ") || "none"}.${result.errors.length ? ` Errors: ${result.errors.join("; ")}` : ""}`,
+      const file = await appendJournalEntry(
+        `Maintenance cycle ran at ${localDateTimeForPrompt(new Date(), getAppTimezone())}. Steps so far: ${result.steps.join("; ") || "none"}.${result.errors.length ? ` Errors: ${result.errors.join("; ")}` : ""}`,
       );
-      result.touchedPaths.push(entry.path);
-      result.steps.push(`journal entry → ${entry.path}`);
+      result.touchedPaths.push(file.path);
+      result.steps.push(`journal entry → ${file.path}`);
     } catch (error) {
       result.errors.push(`journal: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -217,7 +224,7 @@ export async function runMaintenanceCycle(
 
   if (autoIndex && result.touchedPaths.length > 0) {
     try {
-      const indexed = await indexMemoryFiles(provider, result.touchedPaths);
+      const indexed = await indexMemoryFiles(result.touchedPaths, provider);
       result.indexedChunks = indexed.chunks;
       result.steps.push(`re-indexed ${indexed.chunks} chunk(s) from ${result.touchedPaths.length} file(s)`);
     } catch (error) {
@@ -229,17 +236,15 @@ export async function runMaintenanceCycle(
   setAppSetting(KEY_LAST_RUN_AT, ranAt);
   setAppSetting(KEY_LAST_CONVERSATION_ID, conversationId);
   setAppSetting(KEY_LAST_CONVERSATION_UPDATED_AT, conversation.updatedAt);
-  setAppSetting(
-    KEY_LAST_STATUS,
-    JSON.stringify({ ranAt, steps: result.steps, errors: result.errors }),
-  );
+  setAppSetting(KEY_LAST_STATUS, JSON.stringify({ ranAt, steps: result.steps, errors: result.errors }));
   return result;
 }
 
 /** Convenience read used by the export endpoint. */
-export function readLiveState(): string {
+export async function readLiveState(): Promise<string> {
   try {
-    return readMemoryFile("core/live_state.md").content;
+    const file = await readMemoryFile("core/live_state.md");
+    return file.content;
   } catch {
     return "";
   }

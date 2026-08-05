@@ -2,8 +2,8 @@ import { addMessage, createConversation, getConversation, listMessages } from ".
 import { maybeAutoIndexConversation } from "./indexing";
 import { resolveModelDriver } from "./mockModel";
 import { buildModelMessages } from "./prompt";
-import { getActiveProvider } from "./providers";
-import { formatRetrievedMemories, searchMemories } from "./retrieval";
+import { getActiveProvider, isMockProvider } from "./providers";
+import { searchMemories } from "./retrieval";
 import { runToolLoop } from "./toolLoop";
 import { executeRuntimeTool, listAvailableTools } from "./tools";
 import type { ChatStreamEvent, ProviderSettings, RetrievedMemory } from "./types";
@@ -44,21 +44,25 @@ export interface RunChatTurnArgs {
 export async function* runChatTurn(args: RunChatTurnArgs): AsyncGenerator<ChatStreamEvent> {
   const message = args.message.trim();
   if (!message) {
-    yield { type: "error", error: "Message must not be empty." };
+    yield { type: "error", message: "Message must not be empty." };
     return;
   }
 
-  let provider: ProviderSettings;
+  let provider: ProviderSettings | null;
   try {
     provider = args.provider ?? getActiveProvider();
   } catch (error) {
-    yield { type: "error", error: error instanceof Error ? error.message : String(error) };
+    yield { type: "error", message: error instanceof Error ? error.message : String(error) };
+    return;
+  }
+  if (!provider) {
+    yield { type: "error", message: "No active provider configured." };
     return;
   }
 
   let conversationId = args.conversationId;
   if (conversationId && !getConversation(conversationId)) {
-    yield { type: "error", error: `Conversation not found: ${conversationId}` };
+    yield { type: "error", message: `Conversation not found: ${conversationId}` };
     return;
   }
   if (!conversationId) {
@@ -67,34 +71,26 @@ export async function* runChatTurn(args: RunChatTurnArgs): AsyncGenerator<ChatSt
   }
 
   addMessage({ conversationId, role: "user", content: message });
-  yield { type: "status", stage: "retrieving", conversationId };
+  yield { type: "status", message: "Retrieving semantic memory…" };
 
   let retrieved: RetrievedMemory[] = [];
   let retrievalError: string | undefined;
   try {
     const query = buildRetrievalQuery(conversationId, message);
-    retrieved = await searchMemories(provider, query, provider.retrievalTopK);
+    retrieved = await searchMemories(provider, query);
   } catch (error) {
     retrievalError = error instanceof Error ? error.message : String(error);
   }
 
-  yield {
-    type: "meta",
-    conversationId,
-    retrieved: retrieved.map((r) => ({
-      id: r.id,
-      source: r.source,
-      score: r.score,
-      rankScore: r.rankScore,
-      summaryRescued: r.summaryRescued === true,
-      text: r.text.slice(0, 400),
-    })),
-    retrievalError,
-  };
+  yield { type: "meta", conversationId, retrieved };
+  yield { type: "status", message: "Assembling prompt stack…" };
 
-  const modelMessages = buildModelMessages(provider, conversationId, retrieved);
+  const history = listMessages(conversationId, provider.historyMessageLimit);
+  const modelMessages = await buildModelMessages(history, provider, retrieved);
   const tools = listAvailableTools(provider.toolsEnabled);
   const driver = resolveModelDriver(provider);
+
+  yield { type: "status", message: tools.length ? "Model thinking (tools enabled)…" : "Model thinking…" };
 
   let loopResult;
   try {
@@ -104,23 +100,18 @@ export async function* runChatTurn(args: RunChatTurnArgs): AsyncGenerator<ChatSt
       maxToolCalls: MAX_TOOL_CALLS_PER_TURN,
       driver,
       executeTool: (name, toolArgs) => executeRuntimeTool(provider, name, toolArgs, { conversationId }),
-      onToolStart: (name) => {
-        // surfaced through executions below; start events are optional
-        void name;
-      },
     });
   } catch (error) {
-    yield { type: "error", error: error instanceof Error ? error.message : String(error), conversationId };
+    yield { type: "error", message: error instanceof Error ? error.message : String(error) };
     return;
   }
 
   for (const execution of loopResult.executions) {
     yield {
       type: "tool",
-      conversationId,
       name: execution.name,
       ok: execution.ok,
-      error: execution.error,
+      detail: execution.error ?? `${execution.resultChars} chars`,
     };
   }
 
@@ -129,7 +120,7 @@ export async function* runChatTurn(args: RunChatTurnArgs): AsyncGenerator<ChatSt
     "(The model produced no text for this turn. Check the provider configuration.)";
 
   for await (const chunk of streamTextInChunks(finalText)) {
-    yield { type: "token", conversationId, token: chunk };
+    yield { type: "token", content: chunk };
   }
 
   const assistantMessage = addMessage({
@@ -139,7 +130,7 @@ export async function* runChatTurn(args: RunChatTurnArgs): AsyncGenerator<ChatSt
     metadata: {
       provider: provider.name,
       model: provider.modelId,
-      mock: provider.mock,
+      mock: isMockProvider(provider),
       retrievedCount: retrieved.length,
       retrievedIds: retrieved.map((r) => r.id),
       retrievalError,
@@ -152,12 +143,10 @@ export async function* runChatTurn(args: RunChatTurnArgs): AsyncGenerator<ChatSt
   });
 
   try {
-    await maybeAutoIndexConversation(provider, conversationId);
+    await maybeAutoIndexConversation(conversationId, provider);
   } catch {
     // Auto-indexing is best-effort; never fail the turn over it.
   }
 
-  yield { type: "done", conversationId, messageId: assistantMessage.id };
+  yield { type: "done", messageId: assistantMessage.id };
 }
-
-export { formatRetrievedMemories };

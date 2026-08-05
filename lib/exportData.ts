@@ -1,5 +1,5 @@
 import { listConversations, listMessages } from "./conversations";
-import { listMemoryFiles, readMemoryFile } from "./memory";
+import { listMemoryFiles } from "./memory";
 import { getMaintenanceStatus } from "./maintenance";
 
 export interface WorkspaceExport {
@@ -32,13 +32,13 @@ export interface WorkspaceExport {
  * status) as portable JSON. Provider settings and API keys are deliberately
  * excluded — an export must never carry secrets.
  */
-export function exportWorkspace(): WorkspaceExport {
-  const conversations = listConversations(500).map((c) => ({
+export async function exportWorkspace(): Promise<WorkspaceExport> {
+  const conversations = listConversations(200).map((c) => ({
     id: c.id,
     title: c.title,
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
-    messages: listMessages(c.id, 5000).map((m) => ({
+    messages: listMessages(c.id, 1000).map((m) => ({
       id: m.id,
       role: m.role,
       content: m.content,
@@ -47,10 +47,11 @@ export function exportWorkspace(): WorkspaceExport {
     })),
   }));
 
-  const memoryFiles = listMemoryFiles().map((f) => ({
+  const files = await listMemoryFiles();
+  const memoryFiles = files.map((f) => ({
     path: f.path,
-    room: f.room,
-    content: readMemoryFile(f.path).content,
+    room: f.path.split("/")[0] ?? "memory",
+    content: f.content,
     updatedAt: f.updatedAt,
   }));
 
