@@ -1,158 +1,130 @@
 # AI Memory Agent Demo
 
-A portfolio-friendly prototype for a configurable AI companion / agent dashboard with persistent memory, multimodal input, provider switching, scheduled check-ins, and transparent retrieval controls.
+A **runnable, sanitized demo** of a memory-augmented agent system — built to
+showcase the architecture of a larger private project without exposing any of
+its personal content (see `docs/privacy.md`).
 
-This repository is a **sanitized public demo** based on a private experimental project. It keeps the product architecture and UX patterns while removing personal data, private prompts, production URLs, API keys, and real memory files.
+This is not a chat mockup. It's a working agent runtime: layered prompt
+assembly under token budgets, semantic retrieval over a rebuildable vector
+index, a validated tool loop, scheduled agent-initiated check-ins, and a
+maintenance cycle — all inspectable in the UI, and all runnable **fully
+offline** thanks to a deterministic mock model and local embeddings that
+implement the same contracts as the real backends.
 
-## Why this project exists
+## Why it exists
 
-Most chat interfaces treat conversations as disposable. This prototype explores what happens when an AI agent has:
+Portfolio piece. The private original stores personal data and can't be shown;
+this repo preserves the engineering — the parts that make agent memory
+trustworthy: inspectable retrieval, reviewable writes, bounded autonomy, and
+honest failure modes.
 
-- configurable model providers
-- persistent memory files
-- vector search over past context
-- multimodal input support
-- visible memory controls
-- scheduled background check-ins
-- a gallery for generated or uploaded images
-- a UI designed for long-running continuity instead of one-off prompts
-
-The goal is not to build another chatbot. The goal is to design a **memory-aware agent workspace** where users can inspect, shape, and manage the context that influences the assistant.
-
-## Core features
-
-### Provider-agnostic model settings
-
-The app is designed around provider flexibility. A user can configure:
-
-- base URL
-- API key
-- model ID
-- temperature
-- top-p
-- max tokens
-- context window
-- optional penalties
-- optional embedding provider
-- optional vision provider
-
-This makes the app adaptable to OpenAI-compatible providers, hosted model gateways, local models, and future model switches.
-
-### Persistent memory architecture
-
-The demo models three memory layers:
-
-1. **Core files** — stable identity, product behavior, UX rules, and operating principles.
-2. **Conversation history** — recent chat state and selected long-running threads.
-3. **Vector retrieval** — semantic search over indexed context using a Qdrant-like vector store.
-
-The public demo uses fake sample data only.
-
-### Transparent retrieval
-
-The product idea is that memory should not feel magical or hidden. Users should be able to understand what context was retrieved and why.
-
-Potential UX surfaces:
-
-- retrieved memory cards
-- source labels
-- timestamps
-- score/debug view
-- memory edit proposals
-- pinned memories
-- excluded memories
-
-### Multimodal support
-
-The private project supports image upload workflows. This public demo keeps the UI concept:
-
-- upload image
-- preview image in chat
-- send image to a vision-capable model
-- optionally use a separate vision adapter for blind models
-- store generated/uploaded images in a gallery
-
-### Scheduled check-ins
-
-The app includes a conceptual background watcher that can periodically decide whether to:
-
-- send a check-in
-- write a private note
-- do nothing
-- run a maintenance task
-
-In this public version, this is framed as a **scheduled agent check-in** feature rather than a personal heartbeat system.
-
-## UX focus
-
-This project is especially useful as a UX/product case study because it touches several difficult design questions:
-
-- How much memory should an AI agent expose to users?
-- How can users trust retrieved context?
-- How do we prevent stale or irrelevant memories from steering replies?
-- How do we design long-running continuity without making the app feel heavy?
-- How should background autonomy be controlled, logged, and reviewed?
-- How do we support model/provider changes without forcing users to rebuild everything?
-
-## Tech stack
-
-The demo is structured around:
-
-- Next.js / React
-- TypeScript
-- SQLite-style local persistence
-- Qdrant-style vector retrieval
-- OpenAI-compatible provider abstraction
-- modular runtime tools
-- local-first memory files
-
-This public repository includes a simplified implementation and product scaffold rather than the full private production app.
-
-## Repository structure
-
-```txt
-app/
-  page.tsx                 Demo dashboard UI
-  layout.tsx               App shell
-components/
-  ChatMockup.tsx           Portfolio-safe chat interface mockup
-  MemoryPanel.tsx          Transparent memory/retrieval panel
-  ProviderSettings.tsx     Model configuration mockup
-  GalleryMockup.tsx        Image gallery concept
-lib/
-  sampleData.ts            Fake memories, messages, and provider data
-  types.ts                 Shared demo types
-docs/
-  architecture.md          System design overview
-  ux-case-study.md         UX/product framing
-  privacy.md               Sanitization and privacy notes
-```
-
-## Running locally
+## Quick start
 
 ```bash
 npm install
-npm run dev
+npm run init        # seed SQLite schema + starter memory files
+npm run dev         # http://localhost:3000
 ```
 
-Then open:
+No API keys needed. The default "Offline demo model" exercises the real
+pipeline end-to-end. Try:
 
-```txt
-http://localhost:3000
+- *"What do you remember about my preferences?"* → mock routes through the real
+  `search_memory` tool; expand `⌕ N retrieved` on the answer to see the
+  retrieval inspector.
+- *"What time is it?"* → routes through `get_current_time`.
+- *"Summarize this conversation"* → generates, persists, and indexes a thread
+  summary.
+- Settings → **Run maintenance (force)** → watch it refresh `core/live_state.md`,
+  journal its run, and re-index what it touched.
+- Check-ins → schedule one a minute out → **Run cycle now** → it lands in the
+  conversation.
+
+To go live, point the provider at any OpenAI-compatible endpoint in Settings
+(base URL + API key + model ID), and optionally switch the vector backend to
+Qdrant.
+
+Optional background watcher (maintenance + check-in cycles on an interval):
+
+```bash
+npm run watcher
 ```
 
-## Environment variables
+## What one chat turn does
 
-This public demo does not require real API keys. See `.env.example` for placeholder names.
+```
+user message
+     │
+     ▼
+1. persist user turn            (SQLite)
+2. retrieve semantic memory     (pluggable vector backend)
+3. re-rank + summary rescue     (type/source boosts, top-K cut)
+4. assemble prompt stack        (shell → agent stack → time → retrieval → trimmed history)
+5. model + tool loop            (schema-validated calls, 6/turn cap, 30k-char clip)
+6. stream answer over SSE       (status / meta / tool / token / done events)
+7. persist assistant turn       (provider, retrieval IDs, tool-call audit)
+8. cadence-gated auto-indexing
+```
 
-Never commit real API keys, database URLs, private prompts, or personal memory files.
+## Memory layers
 
-## Portfolio framing
+| Layer | Storage | How it's used |
+|---|---|---|
+| Agent stack (`core/*.md`) | Markdown | injected into every prompt under a token budget |
+| Journal (`journal/*.md`) | Markdown | dated continuity log, append-only |
+| Rooms (`notes/`, `projects/`, `scratchpad/`) | Markdown | durable facts and active work, retrieved on demand |
+| Semantic index | Qdrant **or** local JSON store | per-turn retrieval; **rebuildable** from the archive |
+| Conversation archive | SQLite (WAL) | raw history, append-only |
+| Thread summaries | SQLite + indexed | compressed thread windows, rescued into retrieval |
 
-Suggested description:
+Vector point IDs are deterministic (`sha256` of stable keys), so re-indexing
+overwrites instead of duplicating — the index is a rebuildable projection,
+never the source of truth.
 
-> Designed and prototyped an AI memory-agent dashboard with provider switching, persistent memory architecture, vector retrieval, multimodal input concepts, scheduled agent check-ins, and transparent memory controls. Built as a privacy-conscious UX/product exploration for long-running AI interactions.
+## Background lanes
+
+- **Check-ins** — agent-initiated scheduled messages with atomic claiming,
+  stale-claim recovery, occurrence dedupe, and daily/weekly recurrence.
+  Offline mode delivers the pre-written fallback; a live model writes the
+  message with full context.
+- **Maintenance cycle** — refreshes `core/live_state.md`, journals its own
+  run, optionally summarizes + indexes the active thread, and re-indexes
+  touched files. Guarded by an enable flag, a cooldown, and a change guard.
+
+## Repo layout
+
+```
+app/            Next.js UI + API routes (SSE chat, memory, check-ins, settings, export)
+components/     chat client (+retrieval inspector), memory browser, check-in manager, settings
+lib/            the agent runtime (see docs/architecture.md for the tour)
+scripts/        init (seed) + watcher (background cycles)
+tests/          node:test suites for budgeting, the tool loop, and re-ranking
+docs/           architecture deep-dive, ADRs, UX case study, privacy notes
+```
+
+## Scripts
+
+| Command | Purpose |
+|---|---|
+| `npm run dev` | start the dev server |
+| `npm run build` | production build |
+| `npm run init` | seed schema + starter memory files |
+| `npm run watcher` | background maintenance + check-in cycles |
+| `npm run typecheck` | strict TypeScript check |
+| `npm test` | node:test suites |
+
+## Stack
+
+Next.js (App Router) · React 19 · TypeScript strict · better-sqlite3 (WAL) ·
+OpenAI-compatible chat completions with native tool calling · Qdrant (optional)
+· tsx · node:test
+
+> The interesting engineering here isn't the chat — it's everything around the
+> chat: how memory is stored, retrieved, ranked, edited, audited, and kept
+> honest. Start at `docs/architecture.md`.
 
 ## Status
 
-Public sanitized demo. Private production code and personal data are intentionally excluded.
+Sanitized public demo of a private system. Actively maintained as a portfolio
+piece; see `docs/ux-case-study.md` for the design rationale and
+`docs/adr/` for the load-bearing decisions.

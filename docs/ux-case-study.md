@@ -1,100 +1,84 @@
-# UX Case Study: Memory-Aware AI Agent Dashboard
+# UX Case Study: making an agent's memory inspectable
 
 ## Problem
 
-Most AI chat products are optimized for short sessions. They can feel powerful in the moment but weak over time because users cannot easily inspect, correct, or manage what the system remembers.
+Most "AI memory" demos are black boxes: the model says it remembers, the user
+has to take its word for it. For an agent whose entire value proposition is
+durable memory and bounded autonomy, *trust is the product* — and trust comes
+from inspection, not assertion.
 
-For long-running use cases, memory becomes a UX problem:
+The design goal: every claim the system makes about memory must be checkable
+in the UI within one click.
 
-- Users need continuity.
-- Users need control.
-- Users need privacy boundaries.
-- Users need to see what context influenced a response.
-- Users need escape hatches when memory becomes stale, wrong, or too heavy.
+## Key decisions
 
-## Design goal
+### 1. The retrieval inspector is a first-class UI element, not a debug panel
 
-Design an AI agent workspace that makes memory visible and manageable without overwhelming the main chat experience.
+Every assistant answer carries a `⌕ N retrieved` toggle that expands the exact
+memories used for that turn: raw vector score, re-ranked score, source path,
+and whether the item was pulled in by summary rescue. If the agent "remembers"
+something, the user can see the receipt.
 
-## Target users
+**Shipped in:** `components/ChatClient.tsx` (RetrievalInspector), SSE `meta`
+event carrying full ranked payloads.
 
-Potential users include:
+### 2. Memory is plain Markdown the user can edit — with guardrails
 
-- AI power users
-- researchers
-- product managers
-- designers
-- knowledge workers
-- people managing long-running projects
-- users experimenting with personal AI workflows
+Files on disk beat a database blob for inspectability: users can read, diff,
+and back up memory with ordinary tools. The UI adds the two guardrails that
+make direct editing safe: automatic timestamped backups on every write, and a
+proposal queue so the *agent's* significant edits require human accept/reject.
 
-## Key UX decisions
+**Shipped in:** `lib/memory.ts` (backups, safe-path guard),
+`lib/pendingEdits.ts`, `components/MemoryBrowser.tsx`.
 
-### 1. Memory should be inspectable
+### 3. Autonomy is visible, logged, and has an off switch
 
-The assistant should not simply say it remembers something. The interface should show retrieved context as cards with source, confidence, and timestamp.
+Scheduled check-ins and the maintenance cycle are the moments an agent acts
+*without* being asked — exactly where trust is most fragile. Both lanes write
+their reasoning into inspectable places: check-in deliveries land in the
+conversation with structured metadata; maintenance journals what it did into
+`journal/` and a status blob on the Settings page. Every background action has
+a cooldown, a dedupe mechanism, or a kill switch.
 
-### 2. Autonomy should be reviewable
+**Shipped in:** `lib/checkIns.ts`, `lib/maintenance.ts`,
+`components/CheckInManager.tsx`, `components/SettingsForm.tsx`.
 
-Scheduled check-ins and background tasks should have clear logs, cooldowns, and controls. A user should never wonder why the system acted.
+### 4. Offline mode is honest, not theatrical
 
-### 3. Provider settings should be user-facing
+The demo runs with zero API keys — but instead of canned chat responses, the
+mock model sits at the driver contract and exercises the real pipeline. The UI
+labels every mock answer and the status strip says "offline mock model" up
+front. A reviewer never has to wonder whether they're seeing the real
+architecture or a staged demo: it's the real architecture with a deterministic
+model.
 
-Advanced users often change model providers. The app treats provider settings as a first-class surface rather than a hidden config file.
+**Shipped in:** `lib/mockModel.ts`, `docs/adr/0002-offline-mock-model.md`,
+status badges in `components/StatusStrip.tsx` and message metadata.
 
-### 4. Multimodal context should persist visually
+### 5. Streaming is structural, not cosmetic
 
-Images are not only temporary attachments. Generated and uploaded images can become reusable context, references, or artifacts.
+The SSE stream carries typed events — `status`, `meta`, `tool`, `token`,
+`done`, `error` — so the UI can show *what the system is doing* ("Retrieving
+semantic memory…", "Tool: search_memory ✓") rather than a spinner. Retrieval
+results arrive before the first token, so the inspector is populated while the
+answer is still typing.
 
-### 5. Memory should have boundaries
+**Shipped in:** `app/api/chat/route.ts`, `lib/chatEngine.ts`,
+`readSseStream` in `components/ChatClient.tsx`.
 
-The system should distinguish between stable principles, temporary notes, raw conversation history, and generated summaries.
+## Risks & mitigations
 
-## UX risks
+| Risk | Mitigation |
+|---|---|
+| Inspector exposes internals that confuse non-technical users | Scores are formatted compactly and collapsed by default; prose stays primary |
+| Direct file editing lets users break the agent stack | Backups on every write; core files documented with load order in `core/START_HERE.md` |
+| Mock mode misread as the product's real quality | Badges on every mock answer + explicit docs about what mock demonstrates |
+| Background autonomy feels spooky | Everything logged, reversible, and gated; dedupe prevents double-delivery |
 
-### Over-retrieval
+## Next improvements
 
-Too much memory can make the assistant repetitive or overly anchored to old phrasing.
-
-Mitigation:
-
-- memory budgets
-- source filtering
-- recency controls
-- do not immediately re-index every assistant reply
-- summarize before long-term storage
-
-### Trust erosion
-
-If users cannot tell why the assistant knows something, memory can feel invasive.
-
-Mitigation:
-
-- visible memory panel
-- source labels
-- edit/delete controls
-- privacy notes
-
-### Configuration overload
-
-Provider settings can overwhelm non-technical users.
-
-Mitigation:
-
-- progressive disclosure
-- presets
-- advanced mode toggle
-- inline explanations
-
-## What I would improve next
-
-- Add a live retrieval inspector.
-- Add memory pin / exclude controls.
-- Add a first-run onboarding flow.
-- Add fake API routes for demo interactivity.
-- Add a before/after case study showing how memory changes response quality.
-- Add mobile-first refinements for the dashboard layout.
-
-## Portfolio summary
-
-This project demonstrates product thinking around AI memory, transparency, model configuration, multimodal context, and background autonomy. It is intentionally sanitized for public review while preserving the core UX and system design challenges from the private prototype.
+- Diff view for pending edit proposals (old vs. proposed side by side).
+- Retrieval quality harness: fixed query set with expected sources, run in CI.
+- Per-memory "forget this" action that removes both the archive entry and its
+  vector points.

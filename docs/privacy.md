@@ -1,48 +1,42 @@
-# Privacy and Sanitization Notes
+# Privacy & Sanitization
 
-This repository is a public portfolio demo. It is not a dump of a private production project.
+This repository is the **public, sanitized** version of a private project. It
+exists to demonstrate the agent architecture in a portfolio context. This file
+documents what was removed, what was preserved, and why — both so reviewers
+understand the provenance and so the boundary stays maintained.
 
 ## What was removed
 
-The public version excludes:
+- All personal data: names, conversations, journal content, life details,
+  relationships, and anything identifying real people.
+- The private project's domain framing, terminology, and naming — including
+  any framing related to the private project's personal context.
+- All credentials, endpoints, and environment-specific configuration
+  (replaced by `.env.example` placeholders).
+- Private repository history: this repo was created fresh, not forked, so no
+  commit history carries private content.
 
-- real API keys
-- environment secrets
-- private production URLs
-- real user conversations
-- real memory files
-- personal identity documents
-- private community references
-- private screenshots
-- deployment logs
-- sensitive prompts
+## What was preserved (the point of the demo)
 
-## What was preserved
+- The **architecture**: layered prompt stack with token budgeting, semantic
+  retrieval with re-ranking and summary rescue, a validated tool loop,
+  pluggable vector backends, scheduled check-ins, maintenance cycles,
+  deterministic rebuildable indexing.
+- The **safety mechanisms**: path guards, automatic backups, redacted secrets,
+  reviewable memory edits, bounded autonomy with logs and kill switches.
+- The **honesty mechanisms**: labeled mock mode, typed streaming events,
+  retrieval inspector, documented known limits.
 
-The public version keeps the general product and system design ideas:
+## Sanitization mapping
 
-- configurable AI provider settings
-- vector-memory architecture
-- transparent retrieval UX
-- multimodal input concepts
-- scheduled background check-ins
-- image gallery concept
-- privacy-first framing
+Private-project concepts were renamed to neutral engineering terms
+(e.g. memory "rooms", "agent stack", "check-ins", "maintenance cycle"), and
+all starter content was rewritten as generic demo material. No private text
+survives anywhere in the tree.
 
-## Why sanitization matters
+## Production practices kept in the public code
 
-AI memory systems can contain highly sensitive personal context. A responsible public demo should demonstrate architecture and UX thinking without exposing private data.
-
-## Safe demo data
-
-All sample data in this repository is fictional and created only to demonstrate interface behavior.
-
-## Recommended production practices
-
-- Keep secrets in environment variables.
-- Never commit `.env` files.
-- Avoid indexing raw private conversations without user review.
-- Prefer summaries or user-approved memories for long-term storage.
-- Add deletion and exclusion controls.
-- Log background agent actions.
-- Make memory retrieval visible and inspectable.
+- API keys are stored server-side and redacted (`••••••••`) in every response.
+- Workspace exports deliberately exclude provider settings.
+- Memory writes create backups before overwriting.
+- File paths are validated against a strict allowlist regex.
