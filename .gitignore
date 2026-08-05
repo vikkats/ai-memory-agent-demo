@@ -1,12 +1,6 @@
-node_modules
-.next
-out
-dist
+node_modules/
+.next/
+data/
 .env
 .env.local
-.env.*.local
-.DS_Store
-*.log
-/data
-/uploads
-/private-memory
+*.tsbuildinfo

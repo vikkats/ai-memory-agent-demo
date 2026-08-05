@@ -1,22 +1,33 @@
 {
   "name": "ai-memory-agent-demo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
-  "description": "Sanitized portfolio demo for an AI memory-agent dashboard.",
+  "type": "module",
+  "description": "Sanitized portfolio demo of a memory-augmented AI agent workspace.",
+  "engines": {
+    "node": ">=20.9"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "init": "tsx scripts/init.ts",
+    "watcher": "tsx scripts/watcher.ts"
   },
   "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "next": "^16.2.5",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "latest",
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "next": "latest",
-    "react": "latest",
-    "react-dom": "latest",
+    "tsx": "latest",
     "typescript": "latest"
-  },
-  "devDependencies": {}
+  }
 }
