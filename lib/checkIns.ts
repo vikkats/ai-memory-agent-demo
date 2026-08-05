@@ -1,32 +1,33 @@
 import { randomUUID } from "node:crypto";
-import { addMessage, listConversations } from "./conversations";
+import { addMessage, listConversations, listMessages } from "./conversations";
 import { getDb, nowIso } from "./db";
-import { getWatcherConversationId } from "./appSettings";
+import { getAppTimezone, getWatcherConversationId } from "./appSettings";
 import { resolveModelDriver } from "./mockModel";
+import { isMockProvider } from "./providers";
 import { buildModelMessages } from "./prompt";
-import { localDateKey } from "./time";
-import type { CheckIn, ProviderSettings } from "./types";
+import { resolveTimezone } from "./time";
+import type { CheckIn, CheckInRecurrence, ProviderSettings } from "./types";
 
-export const ALLOWED_RECURRENCES = ["none", "daily", "weekly"] as const;
-export type Recurrence = (typeof ALLOWED_RECURRENCES)[number];
+export const ALLOWED_RECURRENCES: CheckInRecurrence[] = ["none", "daily", "weekly"];
 
 export const MAX_DUE_PER_CYCLE = 12;
 export const PROCESSING_STALE_MINUTES = 15;
 
 interface CheckInRow {
   id: string;
-  conversation_id: string | null;
+  conversation_id: string;
   title: string;
   intent: string;
   fallback_message: string;
   due_at: string;
+  timezone: string;
   recurrence: string;
   status: string;
-  processing_started_at: string | null;
-  last_delivered_at: string | null;
-  metadata: string | null;
+  occurrence_count: number;
   created_at: string;
   updated_at: string;
+  fired_at: string | null;
+  last_error: string | null;
 }
 
 function rowToCheckIn(row: CheckInRow): CheckIn {
@@ -37,13 +38,14 @@ function rowToCheckIn(row: CheckInRow): CheckIn {
     intent: row.intent,
     fallbackMessage: row.fallback_message,
     dueAt: row.due_at,
-    recurrence: row.recurrence as Recurrence,
+    timezone: row.timezone,
+    recurrence: row.recurrence as CheckInRecurrence,
     status: row.status as CheckIn["status"],
-    processingStartedAt: row.processing_started_at,
-    lastDeliveredAt: row.last_delivered_at,
-    metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : null,
+    occurrenceCount: row.occurrence_count,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    firedAt: row.fired_at,
+    lastError: row.last_error,
   };
 }
 
@@ -67,7 +69,7 @@ function parseDueAt(raw: string): string {
   return date.toISOString();
 }
 
-function nextDueAt(fromIso: string, recurrence: Recurrence): string {
+function nextDueAt(fromIso: string, recurrence: CheckInRecurrence): string {
   const date = new Date(fromIso);
   if (recurrence === "daily") date.setUTCDate(date.getUTCDate() + 1);
   else if (recurrence === "weekly") date.setUTCDate(date.getUTCDate() + 7);
@@ -79,8 +81,9 @@ export function createCheckIn(input: {
   intent: string;
   fallbackMessage: string;
   dueAt: string;
-  recurrence?: Recurrence;
+  recurrence?: CheckInRecurrence;
   conversationId?: string | null;
+  timezone?: string;
 }): CheckIn {
   const recurrence = input.recurrence ?? "none";
   if (!ALLOWED_RECURRENCES.includes(recurrence)) {
@@ -91,8 +94,8 @@ export function createCheckIn(input: {
   const now = nowIso();
   db.prepare(
     `INSERT INTO check_ins
-       (id, conversation_id, title, intent, fallback_message, due_at, recurrence, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+       (id, conversation_id, title, intent, fallback_message, due_at, timezone, recurrence, status, occurrence_count, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
   ).run(
     id,
     resolveTargetConversation(input.conversationId),
@@ -100,6 +103,7 @@ export function createCheckIn(input: {
     input.intent.trim(),
     input.fallbackMessage.trim(),
     parseDueAt(input.dueAt),
+    resolveTimezone(input.timezone ?? getAppTimezone()),
     recurrence,
     now,
     now,
@@ -126,13 +130,13 @@ export function cancelCheckIn(id: string): boolean {
   return result.changes > 0;
 }
 
-/** Recover check-ins stuck in 'processing' for longer than the stale window. */
+/** Recover check-ins stuck in 'processing' past the stale window (crashed worker). */
 export function recoverStaleProcessing(): number {
   const cutoff = new Date(Date.now() - PROCESSING_STALE_MINUTES * 60_000).toISOString();
   const result = getDb()
     .prepare(
-      `UPDATE check_ins SET status = 'pending', processing_started_at = NULL, updated_at = ?
-       WHERE status = 'processing' AND processing_started_at < ?`,
+      `UPDATE check_ins SET status = 'pending', updated_at = ?
+       WHERE status = 'processing' AND updated_at < ?`,
     )
     .run(nowIso(), cutoff);
   return result.changes;
@@ -153,11 +157,11 @@ export function claimDueCheckIns(now = new Date()): CheckIn[] {
     for (const row of due) {
       const result = db
         .prepare(
-          `UPDATE check_ins SET status = 'processing', processing_started_at = ?, updated_at = ?
+          `UPDATE check_ins SET status = 'processing', updated_at = ?
            WHERE id = ? AND status = 'pending'`,
         )
-        .run(isoNow, isoNow, row.id);
-      if (result.changes > 0) claimed.push(rowToCheckIn({ ...row, status: "processing", processing_started_at: isoNow }));
+        .run(isoNow, row.id);
+      if (result.changes > 0) claimed.push(rowToCheckIn({ ...row, status: "processing", updated_at: isoNow }));
     }
   });
   claim();
@@ -174,8 +178,8 @@ export function occurrenceAlreadyDelivered(checkIn: CheckIn): boolean {
   const row = getDb()
     .prepare(
       `SELECT id FROM messages
-       WHERE conversation_id = ? AND json_extract(metadata, '$.source') = 'scheduled-check-in'
-         AND json_extract(metadata, '$.occurrenceKey') = ?
+       WHERE conversation_id = ? AND json_extract(metadata_json, '$.source') = 'scheduled-check-in'
+         AND json_extract(metadata_json, '$.occurrenceKey') = ?
        LIMIT 1`,
     )
     .get(checkIn.conversationId, key);
@@ -183,15 +187,16 @@ export function occurrenceAlreadyDelivered(checkIn: CheckIn): boolean {
 }
 
 async function generateDueMessage(provider: ProviderSettings, checkIn: CheckIn): Promise<string> {
-  if (provider.mock) return checkIn.fallbackMessage;
+  if (isMockProvider(provider)) return checkIn.fallbackMessage;
   try {
     const driver = resolveModelDriver(provider);
-    const messages = buildModelMessages(provider, checkIn.conversationId!, []);
+    const history = listMessages(checkIn.conversationId, 40);
+    const messages = await buildModelMessages(history, provider, []);
     messages.push({
       role: "user",
-      content: `[Scheduled check-in fired: "${checkIn.title}" — ${localDateKey()}]\nIntent: ${checkIn.intent}\nWrite the check-in message now, in your own voice. Keep it short and natural. If you have nothing useful to add beyond the intent, reply with exactly: ${checkIn.fallbackMessage}`,
+      content: `[Scheduled check-in fired: "${checkIn.title}" — due ${checkIn.dueAt}]\nIntent: ${checkIn.intent}\nWrite the check-in message now, in your own voice. Keep it short and natural. If you have nothing useful to add beyond the intent, reply with exactly: ${checkIn.fallbackMessage}`,
     });
-    const response = await driver.complete({ messages });
+    const response = await driver(messages, []);
     const text = response.text?.trim();
     return text && text.length > 0 ? text : checkIn.fallbackMessage;
   } catch {
@@ -199,28 +204,31 @@ async function generateDueMessage(provider: ProviderSettings, checkIn: CheckIn):
   }
 }
 
-function markDelivered(checkIn: CheckIn): void {
+function markDelivered(checkIn: CheckIn): string | null {
   const now = nowIso();
   if (checkIn.recurrence === "none") {
     getDb()
       .prepare(
-        `UPDATE check_ins SET status = 'fired', processing_started_at = NULL, last_delivered_at = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE check_ins SET status = 'fired', fired_at = ?, last_error = NULL,
+           occurrence_count = occurrence_count + 1, updated_at = ? WHERE id = ?`,
       )
       .run(now, now, checkIn.id);
-  } else {
-    getDb()
-      .prepare(
-        `UPDATE check_ins SET status = 'pending', processing_started_at = NULL, due_at = ?, last_delivered_at = ?, updated_at = ? WHERE id = ?`,
-      )
-      .run(nextDueAt(checkIn.dueAt, checkIn.recurrence), now, now, checkIn.id);
+    return null;
   }
+  const rescheduled = nextDueAt(checkIn.dueAt, checkIn.recurrence);
+  getDb()
+    .prepare(
+      `UPDATE check_ins SET status = 'pending', due_at = ?, fired_at = ?, last_error = NULL,
+         occurrence_count = occurrence_count + 1, updated_at = ? WHERE id = ?`,
+    )
+    .run(rescheduled, now, now, checkIn.id);
+  return rescheduled;
 }
 
 function markFailed(checkIn: CheckIn, error: string): void {
   getDb()
     .prepare(
-      `UPDATE check_ins SET status = 'pending', processing_started_at = NULL,
-         metadata = json_set(COALESCE(metadata, '{}'), '$.lastError', ?), updated_at = ? WHERE id = ?`,
+      `UPDATE check_ins SET status = 'pending', last_error = ?, updated_at = ? WHERE id = ?`,
     )
     .run(error.slice(0, 500), nowIso(), checkIn.id);
 }
@@ -238,13 +246,15 @@ async function deliverCheckIn(
   provider: ProviderSettings,
   checkIn: CheckIn,
 ): Promise<CheckInDeliveryResult> {
-  if (!checkIn.conversationId) {
-    markFailed(checkIn, "No target conversation.");
-    return { checkInId: checkIn.id, title: checkIn.title, delivered: false, error: "No target conversation." };
-  }
   if (occurrenceAlreadyDelivered(checkIn)) {
-    markDelivered(checkIn);
-    return { checkInId: checkIn.id, title: checkIn.title, delivered: false, error: "Duplicate occurrence skipped." };
+    const rescheduledTo = markDelivered(checkIn) ?? undefined;
+    return {
+      checkInId: checkIn.id,
+      title: checkIn.title,
+      delivered: false,
+      error: "Duplicate occurrence skipped.",
+      rescheduledTo,
+    };
   }
 
   const text = await generateDueMessage(provider, checkIn);
@@ -261,13 +271,13 @@ async function deliverCheckIn(
       recurrence: checkIn.recurrence,
     },
   });
-  markDelivered(checkIn);
+  const rescheduled = markDelivered(checkIn);
   return {
     checkInId: checkIn.id,
     title: checkIn.title,
     delivered: true,
     messageId: message.id,
-    rescheduledTo: checkIn.recurrence === "none" ? undefined : nextDueAt(checkIn.dueAt, checkIn.recurrence),
+    rescheduledTo: rescheduled ?? undefined,
   };
 }
 

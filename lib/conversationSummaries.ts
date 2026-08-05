@@ -3,7 +3,8 @@ import { getConversation, listMessages } from "./conversations";
 import { getDb, nowIso } from "./db";
 import { createEmbedding } from "./embeddings";
 import { pointIdForSummary } from "./indexing";
-import { resolveModelDriver } from "./mockModel";
+import { generateText } from "./mockModel";
+import { isMockProvider } from "./providers";
 import { estimateTokens } from "./tokens";
 import type { ChatMessage, ConversationSummary, ProviderSettings } from "./types";
 import { upsertVectorPoints } from "./vectorStore";
@@ -30,10 +31,11 @@ interface SummaryRow {
   id: string;
   conversation_id: string;
   summary_key: string;
-  summary_text: string;
-  message_count: number;
   start_date: string | null;
   end_date: string | null;
+  summary: string;
+  message_count: number;
+  last_message_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -43,10 +45,11 @@ function rowToSummary(row: SummaryRow): ConversationSummary {
     id: row.id,
     conversationId: row.conversation_id,
     summaryKey: row.summary_key,
-    summaryText: row.summary_text,
-    messageCount: row.message_count,
     startDate: row.start_date,
     endDate: row.end_date,
+    summary: row.summary,
+    messageCount: row.message_count,
+    lastMessageId: row.last_message_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -57,9 +60,7 @@ export function getConversationSummary(
   summaryKey = "all",
 ): ConversationSummary | null {
   const row = getDb()
-    .prepare(
-      `SELECT * FROM conversation_summaries WHERE conversation_id = ? AND summary_key = ?`,
-    )
+    .prepare(`SELECT * FROM conversation_summaries WHERE conversation_id = ? AND summary_key = ?`)
     .get(conversationId, summaryKey) as SummaryRow | undefined;
   return row ? rowToSummary(row) : null;
 }
@@ -67,8 +68,9 @@ export function getConversationSummary(
 export function saveConversationSummary(input: {
   conversationId: string;
   summaryKey: string;
-  summaryText: string;
+  summary: string;
   messageCount: number;
+  lastMessageId?: string | null;
   startDate?: string | null;
   endDate?: string | null;
 }): ConversationSummary {
@@ -78,22 +80,24 @@ export function saveConversationSummary(input: {
   const now = nowIso();
   db.prepare(
     `INSERT INTO conversation_summaries
-       (id, conversation_id, summary_key, summary_text, message_count, start_date, end_date, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (id, conversation_id, summary_key, start_date, end_date, summary, message_count, last_message_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(conversation_id, summary_key) DO UPDATE SET
-       summary_text = excluded.summary_text,
-       message_count = excluded.message_count,
        start_date = excluded.start_date,
        end_date = excluded.end_date,
+       summary = excluded.summary,
+       message_count = excluded.message_count,
+       last_message_id = excluded.last_message_id,
        updated_at = excluded.updated_at`,
   ).run(
     id,
     input.conversationId,
     input.summaryKey,
-    input.summaryText,
-    input.messageCount,
     input.startDate ?? null,
     input.endDate ?? null,
+    input.summary,
+    input.messageCount,
+    input.lastMessageId ?? null,
     existing?.createdAt ?? now,
     now,
   );
@@ -148,24 +152,21 @@ async function generativeSummary(
   messages: ChatMessage[],
   windowLabel: string,
 ): Promise<string> {
-  const driver = resolveModelDriver(provider);
   const transcript = messages
     .map((m) => `[${m.createdAt}] ${m.role.toUpperCase()}: ${clipMessage(m.content)}`)
     .join("\n");
-  const response = await driver.complete({
-    messages: [
-      {
-        role: "system",
-        content:
-          "You write durable conversation summaries for retrieval. Be specific, factual, and compact. Use exactly these sections: # Thread Summary, ## Date range, ## What happened, ## Decisions, ## Open loops.",
-      },
-      {
-        role: "user",
-        content: `Summarize this conversation window (${windowLabel}):\n\n${transcript}`,
-      },
-    ],
-  });
-  return response.text?.trim() || extractiveSummary(messages, windowLabel);
+  const text = await generateText(provider, [
+    {
+      role: "system",
+      content:
+        "You write durable conversation summaries for retrieval. Be specific, factual, and compact. Use exactly these sections: # Thread Summary, ## Date range, ## What happened, ## Decisions, ## Open loops.",
+    },
+    {
+      role: "user",
+      content: `Summarize this conversation window (${windowLabel}):\n\n${transcript}`,
+    },
+  ]);
+  return text.trim() || extractiveSummary(messages, windowLabel);
 }
 
 export interface SummarizeOptions {
@@ -181,26 +182,26 @@ export async function summarizeConversation(
   const conversation = getConversation(conversationId);
   if (!conversation) throw new Error(`Conversation not found: ${conversationId}`);
 
-  const all = listMessages(conversationId, 2000);
+  const all = listMessages(conversationId, 1000);
   const windowed = selectWindow(all, options.startDate, options.endDate);
   if (windowed.length === 0) return null;
 
   const start = normalizeDate(options.startDate);
   const end = normalizeDate(options.endDate);
-  const windowLabel =
-    start || end
-      ? `${start ?? windowed[0].createdAt.slice(0, 10)} → ${end ?? windowed[windowed.length - 1].createdAt.slice(0, 10)}`
-      : `${windowed[0].createdAt.slice(0, 10)} → ${windowed[windowed.length - 1].createdAt.slice(0, 10)}`;
+  const firstDay = windowed[0].createdAt.slice(0, 10);
+  const lastDay = windowed[windowed.length - 1].createdAt.slice(0, 10);
+  const windowLabel = `${start ?? firstDay} → ${end ?? lastDay}`;
 
-  const text = provider.mock
+  const text = isMockProvider(provider)
     ? extractiveSummary(windowed, windowLabel)
     : await generativeSummary(provider, windowed, windowLabel);
 
   return saveConversationSummary({
     conversationId,
     summaryKey: summaryKeyForWindow(options.startDate, options.endDate),
-    summaryText: text,
+    summary: text,
     messageCount: windowed.length,
+    lastMessageId: windowed[windowed.length - 1]?.id ?? null,
     startDate: start,
     endDate: end,
   });
@@ -218,12 +219,12 @@ export async function summarizeAndIndexConversation(
   const summary = await summarizeConversation(provider, conversationId, options);
   if (!summary) return null;
 
-  const indexText = summary.summaryText.slice(0, 8000);
-  const embedding = await createEmbedding(provider, indexText);
+  const indexText = summary.summary.slice(0, 8000);
+  const vector = await createEmbedding(provider, indexText);
   await upsertVectorPoints(provider, [
     {
       id: pointIdForSummary(conversationId, summary.summaryKey),
-      vector: embedding,
+      vector,
       payload: {
         type: "conversation_summary",
         conversationId,
