@@ -22,11 +22,13 @@ test("summary rescue swaps in a decent summary that missed the top-K cut", () =>
     memory("msg-1", "conversation_message", 0.9, 0.9),
     memory("msg-2", "conversation_message", 0.8, 0.8),
     memory("msg-3", "conversation_message", 0.7, 0.7),
-    memory("sum-1", "conversation_summary", 0.65, 0.81), // boosted but still ranked 4th… wait
+    // Raw score clears the 0.2 rescue floor but the rank misses the top-3 cut.
+    memory("sum-1", "conversation_summary", 0.65, 0.68),
   ];
   const rescued = rescueBestSummary(candidates, 3);
   assert.equal(rescued.length, 3);
   assert.ok(rescued.some((m) => m.id === "sum-1"), "summary should be rescued into the top-K");
+  assert.ok(!rescued.some((m) => m.id === "msg-3"), "weakest non-summary should be swapped out");
   const rescuedSummary = rescued.find((m) => m.id === "sum-1");
   assert.equal(rescuedSummary?.payload?.summaryRescued, true);
 });
