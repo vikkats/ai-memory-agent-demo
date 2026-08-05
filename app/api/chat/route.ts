@@ -16,7 +16,8 @@ export async function POST(request: Request) {
     return Response.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
-  if (!body.message || !body.message.trim()) {
+  const message = body.message?.trim();
+  if (!message) {
     return Response.json({ error: "message is required." }, { status: 400 });
   }
 
@@ -29,7 +30,7 @@ export async function POST(request: Request) {
       try {
         for await (const event of runChatTurn({
           conversationId: body.conversationId,
-          message: body.message,
+          message,
         })) {
           send(event);
         }

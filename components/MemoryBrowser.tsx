@@ -83,7 +83,7 @@ export function MemoryBrowser() {
       res.ok
         ? action === "accept"
           ? `Proposal accepted${data.backupPath ? ` (backup: ${data.backupPath})` : ""}.`
-          : "Proposal rejected.",
+          : "Proposal rejected."
         : (data.error ?? "Action failed."),
     );
     await refresh();
