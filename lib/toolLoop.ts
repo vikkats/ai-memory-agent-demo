@@ -1,7 +1,4 @@
-import type {
-  DriverResponse,
-  ModelDriver,
-} from "./mockModel";
+import type { DriverResponse, ModelDriver } from "./mockModel";
 import type { ModelMessage, ModelToolCall, ModelToolDefinition } from "./openaiCompat";
 import type { RuntimeTool } from "./tools";
 
@@ -58,9 +55,14 @@ export function prepareToolDefinitions(tools: RuntimeTool[]): {
   return { definitions, nameBySafe };
 }
 
-/** Parse a tool-call argument string into an object, tolerating empty input. */
-export function parseToolArguments(raw: string | undefined | null): Record<string, unknown> {
-  if (!raw || raw.trim().length === 0) return {};
+/** Parse tool-call arguments (string or pre-parsed object) into an object. */
+export function parseToolArguments(raw: string | Record<string, unknown> | undefined | null): Record<string, unknown> {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw === "object") {
+    if (Array.isArray(raw)) throw new Error("Tool arguments must be a JSON object.");
+    return raw;
+  }
+  if (raw.trim().length === 0) return {};
   const parsed: unknown = JSON.parse(raw);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("Tool arguments must be a JSON object.");
@@ -112,7 +114,7 @@ export function validateToolArguments(
     if (type && !valueMatchesJsonType(value, type)) {
       return `Argument "${key}" must be of type ${type}.`;
     }
-    if (Array.isArray(prop.enum) && !prop.enum.includes(value)) {
+    if (Array.isArray(prop.enum) && !(prop.enum as unknown[]).includes(value)) {
       return `Argument "${key}" must be one of: ${(prop.enum as unknown[]).join(", ")}.`;
     }
   }
@@ -138,48 +140,32 @@ interface RunToolLoopArgs {
 /**
  * Run the model/tool loop: the model may emit tool calls, each call is
  * validated and executed, results are fed back, and the loop continues until
- * the model produces a plain text answer or the per-turn call cap is hit.
- * When the cap is hit, one final pass runs with tools disabled so the model
- * must answer with what it has.
+ * the model produces a plain text answer. Once the per-turn call cap is hit,
+ * further rounds run with an empty tool list so the model must answer with
+ * what it already has.
  */
 export async function runToolLoop(args: RunToolLoopArgs): Promise<ToolLoopResult> {
   const messages: ModelMessage[] = [...args.modelMessages];
   const { definitions, nameBySafe } = prepareToolDefinitions(args.tools);
   const executions: ToolExecution[] = [];
   let attemptedCalls = 0;
-  let hitToolLimit = false;
+  const maxRounds = args.maxToolCalls + 2;
 
-  for (let round = 0; round <= args.maxToolCalls; round += 1) {
+  for (let round = 0; round < maxRounds; round += 1) {
     const toolsAllowed = attemptedCalls < args.maxToolCalls && definitions.length > 0;
-    const response: DriverResponse = await args.driver.complete({
-      messages,
-      tools: toolsAllowed ? definitions : undefined,
-    });
-
-    const toolCalls: ModelToolCall[] = response.toolCalls ?? [];
+    const response: DriverResponse = await args.driver(messages, toolsAllowed ? definitions : []);
+    const toolCalls: ModelToolCall[] = toolsAllowed ? response.toolCalls : [];
 
     if (toolCalls.length === 0) {
-      return { finalText: response.text ?? "", executions, hitToolLimit };
-    }
-
-    if (!toolsAllowed) {
-      // Model tried to call tools after the cap: force a plain answer.
-      hitToolLimit = true;
-      messages.push({
-        role: "user",
-        content:
-          "Tool use is disabled for the remainder of this turn. Answer directly using the information you already have.",
-      });
-      const finalResponse = await args.driver.complete({ messages });
-      return { finalText: finalResponse.text ?? "", executions, hitToolLimit: true };
+      return {
+        finalText: response.text ?? "",
+        executions,
+        hitToolLimit: attemptedCalls >= args.maxToolCalls && args.maxToolCalls > 0 && executions.length > 0,
+      };
     }
 
     // Append the assistant message that carried the tool calls exactly once.
-    messages.push({
-      role: "assistant",
-      content: response.text ?? null,
-      tool_calls: toolCalls,
-    });
+    messages.push(response.assistantMessage);
 
     for (const call of toolCalls) {
       attemptedCalls += 1;
@@ -191,13 +177,7 @@ export async function runToolLoop(args: RunToolLoopArgs): Promise<ToolLoopResult
         parsedArgs = parseToolArguments(call.function.arguments);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        executions.push({
-          name: runtimeName,
-          arguments: {},
-          ok: false,
-          error: message,
-          resultChars: 0,
-        });
+        executions.push({ name: runtimeName, arguments: {}, ok: false, error: message, resultChars: 0 });
         messages.push({
           role: "tool",
           tool_call_id: call.id,
@@ -208,7 +188,9 @@ export async function runToolLoop(args: RunToolLoopArgs): Promise<ToolLoopResult
       }
 
       const tool = args.tools.find((t) => t.name === runtimeName);
-      const validationError = tool ? validateToolArguments(tool.inputSchema, parsedArgs) : `Unknown tool: ${runtimeName}`;
+      const validationError = tool
+        ? validateToolArguments(tool.inputSchema, parsedArgs)
+        : `Unknown tool: ${runtimeName}`;
       if (validationError) {
         executions.push({
           name: runtimeName,
@@ -246,7 +228,6 @@ export async function runToolLoop(args: RunToolLoopArgs): Promise<ToolLoopResult
   }
 
   // Exhausted rounds without a plain answer: one last tools-disabled pass.
-  hitToolLimit = true;
-  const finalResponse = await args.driver.complete({ messages });
-  return { finalText: finalResponse.text ?? "", executions, hitToolLimit };
+  const finalResponse = await args.driver(messages, []);
+  return { finalText: finalResponse.text ?? "", executions, hitToolLimit: true };
 }
